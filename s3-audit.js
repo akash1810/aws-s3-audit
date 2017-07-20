@@ -20,54 +20,78 @@ AWS.config.update({
     region: Config.region
 });
 
-
-function getBucketInfo(bucket) {
+function isBucketPublicViaAcl(bucket) {
     return new Promise((resolve, reject) => {
         const s3 = new AWS.S3();
 
-        s3.getBucketAcl({Bucket: bucket.Name}, (err, acl) => {
+        s3.getBucketAcl({Bucket: bucket.Name}, (err, data) => {
             if (err) {
                 reject(err);
             } else {
-                const publicAcls = acl.Grants.filter(g => {
+                const publicAcls = data.Grants.filter(g => {
                     return g.Grantee.URI
                         && g.Grantee.URI === 'http://acs.amazonaws.com/groups/global/AllUsers'
                         && ['READ', 'READ_ACP', 'FULL_CONTROL'].includes(g.Permission);
                 });
 
-                const bucketInfo = {
-                    Created: bucket.CreationDate,
-                    Bucket: bucket.Name,
-                    Account: Config.profile,
-                    IsPublic: publicAcls.length !== 0
-                };
+                resolve(publicAcls.length !== 0);
+            }
+        })
+    });
+}
 
-                s3.getBucketPolicy({Bucket: bucket.Name}, (e, policyData) => {
-                    if (e) {
-                        if (e.code === 'NoSuchBucketPolicy') {
-                            resolve(bucketInfo);
-                        } else {
-                            reject(e);
-                        }
-                    } else {
-                        const policy = JSON.parse(policyData.Policy);
+function isBucketPublicViaPolicy(bucket) {
+    const isPublicPrincipal = (principal) => {
+        return typeof(principal) === 'object'
+            ? principal.AWS === '*'
+            : principal === '*';
+    };
 
-                        const publicGetters = policy.Statement.filter(statement => {
-                            return statement.Effect === 'Allow'
-                                && statement.Action === 's3:GetObject'
-                                && statement.Principal === '*';
-                        });
+    return new Promise((resolve, reject) => {
+        const s3 = new AWS.S3();
 
-                        const bucketInfoWithPolicy = Object.assign({}, bucketInfo, {
-                            IsPublic: publicAcls.length !== 0 || publicGetters.length !== 0
-                        });
+        s3.getBucketPolicy({Bucket: bucket.Name}, (e, data) => {
+            if (e) {
+                if (e.code === 'NoSuchBucketPolicy') {
+                    resolve(false);
+                } else {
+                    reject(e);
+                }
+            } else {
+                const policy = JSON.parse(data.Policy);
 
-                        resolve(bucketInfoWithPolicy);
-
-                    }
+                const publicGetters = policy.Statement.filter(statement => {
+                    return statement.Effect === 'Allow'
+                        && statement.Action === 's3:GetObject'
+                        && isPublicPrincipal(statement.Principal)
+                        && statement.Condition === undefined; // assume * GetObject policies with a Conditional aren't open to the world
                 });
 
+                resolve(publicGetters.length !== 0);
             }
+        });
+    });
+}
+
+function getBucketInfo(bucket) {
+    return new Promise((resolve, reject) => {
+        Promise.all([
+            isBucketPublicViaAcl(bucket),
+            isBucketPublicViaPolicy(bucket)
+        ]).then(policies => {
+            const [isAclPublic, isPolicyPublic] = policies;
+
+            const bucketInfo = {
+                Created: bucket.CreationDate,
+                Bucket: bucket.Name,
+                Account: Config.profile,
+                IsPublic: isAclPublic || isPolicyPublic
+            };
+
+            resolve(bucketInfo);
+        }).catch(err => {
+            console.log(err);
+            reject(err);
         });
     });
 }
@@ -105,7 +129,8 @@ getBuckets().then(buckets => {
 
                 console.log(`${filename} created`);
             });
-        }).catch(err => {
+        })
+        .catch(err => {
             console.log(err);
             throw(err);
         });
