@@ -6,7 +6,7 @@ const fs = require('fs');
 
 class Config {
     static get profile() {
-        return process.env.PROFILE || 'media-service';
+        return process.env.PROFILE || 'default';
     }
     static get region() {
         return process.env.REGION || 'eu-west-1';
@@ -73,27 +73,16 @@ function isBucketPublicViaPolicy(bucket) {
     });
 }
 
-function getBucketInfo(bucket) {
-    return new Promise((resolve, reject) => {
-        Promise.all([
-            isBucketPublicViaAcl(bucket),
-            isBucketPublicViaPolicy(bucket)
-        ]).then(policies => {
-            const [isAclPublic, isPolicyPublic] = policies;
+async function getBucketInfo(bucket) {
+    const isAclPublic = await isBucketPublicViaAcl(bucket);
+    const isPolicyPublic = await isBucketPublicViaPolicy(bucket);
 
-            const bucketInfo = {
-                Created: bucket.CreationDate,
-                Bucket: bucket.Name,
-                Account: Config.profile,
-                IsPublic: isAclPublic || isPolicyPublic
-            };
-
-            resolve(bucketInfo);
-        }).catch(err => {
-            console.log(err);
-            reject(err);
-        });
-    });
+    return {
+        Created: bucket.CreationDate,
+        Bucket: bucket.Name,
+        Account: Config.profile,
+        IsPublic: isAclPublic || isPolicyPublic
+    };
 }
 
 function getBuckets() {
@@ -101,40 +90,26 @@ function getBuckets() {
         const s3 = new AWS.S3();
 
         s3.listBuckets({}, (err, data) => {
-            if (err) {
-                reject(err);
-            }
-
-            resolve(data.Buckets);
+            err ? reject(err) : resolve(data.Buckets)
         });
     });
 }
 
-getBuckets().then(buckets => {
-    const promises = buckets.map(bucket => getBucketInfo(bucket));
+async function main() {
+    const buckets = await getBuckets();
+    const bucketInfo = await Promise.all(buckets.map(_ => getBucketInfo(_)));
 
-    Promise.all(promises)
-        .then(bucketInfo => {
-            const fields = Object.keys(bucketInfo[0]);
+    const fields = Object.keys(bucketInfo[0]);
+    const csv = json2csv({data: bucketInfo, fields: fields});
 
-            const csv = json2csv({data: bucketInfo, fields: fields});
+    const filename = `${Config.profile}-buckets.csv`;
+    fs.writeFileSync(filename, csv);
 
-            const filename = `${Config.profile}-buckets.csv`;
+    return filename;
+}
 
-            fs.writeFile(filename, csv, err => {
-                if (err) {
-                    console.log(err);
-                    throw err;
-                }
+console.log(`Fetching information for S3 buckets in ${Config.profile}`);
 
-                console.log(`${filename} created`);
-            });
-        })
-        .catch(err => {
-            console.log(err);
-            throw(err);
-        });
-}).catch(err => {
-    console.log(err);
-    throw err;
-});
+main()
+    .then(filename => console.log(`${filename} created`))
+    .catch(e => console.log(e));
