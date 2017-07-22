@@ -20,57 +20,47 @@ AWS.config.update({
     region: Config.region
 });
 
-function isBucketPublicViaAcl(bucket) {
-    return new Promise((resolve, reject) => {
-        const s3 = new AWS.S3();
+const S3 = new AWS.S3();
 
-        s3.getBucketAcl({Bucket: bucket.Name}, (err, data) => {
-            if (err) {
-                reject(err);
-            } else {
-                const publicAcls = data.Grants.filter(g => {
-                    return g.Grantee.URI
-                        && g.Grantee.URI === 'http://acs.amazonaws.com/groups/global/AllUsers'
-                        && ['READ', 'READ_ACP', 'FULL_CONTROL'].includes(g.Permission);
-                });
+async function isBucketPublicViaAcl(bucket) {
+    const data = await S3.getBucketAcl({Bucket: bucket.Name}).promise();
 
-                resolve(publicAcls.length !== 0);
-            }
-        })
+    const publicAcls = data.Grants.filter(g => {
+        return g.Grantee.URI
+            && g.Grantee.URI === 'http://acs.amazonaws.com/groups/global/AllUsers'
+            && ['READ', 'READ_ACP', 'FULL_CONTROL'].includes(g.Permission);
     });
+
+    return publicAcls.length !== 0;
 }
 
-function isBucketPublicViaPolicy(bucket) {
+async function isBucketPublicViaPolicy(bucket) {
     const isPublicPrincipal = (principal) => {
         return typeof(principal) === 'object'
             ? principal.AWS === '*'
             : principal === '*';
     };
 
-    return new Promise((resolve, reject) => {
-        const s3 = new AWS.S3();
+    try {
+        const data = await S3.getBucketPolicy({Bucket: bucket.Name}).promise();
+        const policy = JSON.parse(data.Policy);
 
-        s3.getBucketPolicy({Bucket: bucket.Name}, (e, data) => {
-            if (e) {
-                if (e.code === 'NoSuchBucketPolicy') {
-                    resolve(false);
-                } else {
-                    reject(e);
-                }
-            } else {
-                const policy = JSON.parse(data.Policy);
-
-                const publicGetters = policy.Statement.filter(statement => {
-                    return statement.Effect === 'Allow'
-                        && statement.Action === 's3:GetObject'
-                        && isPublicPrincipal(statement.Principal)
-                        && statement.Condition === undefined; // assume * GetObject policies with a Conditional aren't open to the world
-                });
-
-                resolve(publicGetters.length !== 0);
-            }
+        const publicGetters = policy.Statement.filter(statement => {
+            return statement.Effect === 'Allow'
+                && statement.Action === 's3:GetObject'
+                && isPublicPrincipal(statement.Principal)
+                && statement.Condition === undefined; // assume * GetObject policies with a Conditional aren't open to the world
         });
-    });
+
+        return publicGetters.length !== 0;
+
+    } catch (e) {
+        if (e.code === 'NoSuchBucketPolicy') {
+            return false;
+        } else {
+            throw e;
+        }
+    }
 }
 
 async function getBucketInfo(bucket) {
@@ -85,19 +75,12 @@ async function getBucketInfo(bucket) {
     };
 }
 
-function getBuckets() {
-    return new Promise((resolve, reject) => {
-        const s3 = new AWS.S3();
-
-        s3.listBuckets({}, (err, data) => {
-            err ? reject(err) : resolve(data.Buckets)
-        });
-    });
-}
-
 async function main() {
-    const buckets = await getBuckets();
-    const bucketInfo = await Promise.all(buckets.map(_ => getBucketInfo(_)));
+    console.log(`Fetching information for S3 buckets in ${Config.profile}`);
+    const bucketList = await S3.listBuckets().promise();
+    console.log(`There are ${bucketList.Buckets.length} buckets`);
+
+    const bucketInfo = await Promise.all(bucketList.Buckets.map(_ => getBucketInfo(_)));
 
     const fields = Object.keys(bucketInfo[0]);
     const csv = json2csv({data: bucketInfo, fields: fields});
@@ -107,8 +90,6 @@ async function main() {
 
     return filename;
 }
-
-console.log(`Fetching information for S3 buckets in ${Config.profile}`);
 
 main()
     .then(filename => console.log(`${filename} created`))
